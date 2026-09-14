@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from app.db import audit, connect, fetchall, fetchone, initialize
+from app.training_store import initialize_training
 from app.schemas import (
     Catalog, Connection, ExampleCreate, ExamplePatch, ModelAnswer,
     PromptCreate, ReplyRequest, TestRequest,
@@ -70,13 +72,14 @@ async def lifespan(app: FastAPI):
     if min(len(a), len(r)) < 32 or a == r:
         raise RuntimeError("Set two distinct AI_ADMIN_KEY / AI_REPLY_KEY values of >=32 characters")
     await initialize()
+    await initialize_training()
     yield
     for task in list(tasks.values()):
         task.cancel()
     await asyncio.gather(*list(tasks.values()), return_exceptions=True)
 
 
-app = FastAPI(title="FGBFBF AI API", version="0.1.0", lifespan=lifespan,
+app = FastAPI(title="FGBFBF AI API", version="0.2.0", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 
 
@@ -87,9 +90,10 @@ async def limit_body(request: Request, call_next):
         parts, size = [], 0
         async for chunk in request.stream():
             size += len(chunk)
-            if size > 256_000:
+            max_size = 32_000_000 if request.url.path in {'/v1/datasets', '/v1/datasets/import'} else 256_000
+            if size > max_size:
                 return JSONResponse(status_code=413, content={"error": {
-                    "code": "body_too_large", "message": "Максимум 256 КБ на запрос"}})
+                    "code": "body_too_large", "message": f"Максимум {max_size} байт на запрос"}})
             parts.append(chunk)
         request._body = b"".join(parts)
     return await call_next(request)
@@ -123,8 +127,11 @@ async def openapi():
 
 @app.get("/v1/capabilities", dependencies=[Depends(authorized)])
 async def capabilities():
-    return {"replies_available": True, "training_available": False,
-            "training_reason": "Обучающий GPU backend не подключён",
+    async with connect() as db:
+        worker = await fetchone(db, 'SELECT heartbeat FROM training_worker WHERE id=1')
+    available = bool(worker and time.time() - worker['heartbeat'] < 30)
+    return {"replies_available": True, "training_available": available,
+            "training_reason": None if available else "Обучающий GPU worker не подключён",
             "automatic_client_sending": False}
 
 
@@ -311,8 +318,11 @@ def task_finished(request_id, task):
         task.exception()  # retrieve exception even if HTTP caller disconnected
 
 
-async def submit(body: ReplyRequest, test=False):
-    serialized = json.dumps({"test": test, **body.model_dump()}, sort_keys=True, ensure_ascii=False)
+async def submit(body: ReplyRequest, test=False, model_override=None):
+    payload = {"test": test, **body.model_dump()}
+    if model_override is not None:
+        payload['model_override'] = model_override
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha256(serialized.encode()).hexdigest()
     async with submission_lock:
         async with connect() as db:
@@ -329,6 +339,8 @@ async def submit(body: ReplyRequest, test=False):
                 fail(429, "queue_full", "Очередь заполнена, повторите запрос позже")
             row = await fetchone(db, "SELECT * FROM settings WHERE id=1")
             config = require_connection(row)
+            if model_override:
+                config.model = model_override
             prompt_id = body.prompt_id if isinstance(body, TestRequest) and body.prompt_id else row["active_prompt_id"]
             prompt = await fetchone(db, "SELECT * FROM prompts WHERE id=?", (prompt_id,))
             if not prompt:
@@ -455,6 +467,6 @@ async def audit_history(limit: int = Query(50, ge=1, le=200), offset: int = Quer
         return {"items": await fetchall(db, "SELECT * FROM audit ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))}
 
 
-@app.post("/v1/training/jobs", dependencies=[Depends(admin)])
-async def training_unavailable():
-    fail(501, "training_unavailable", "Обучение не подключено. Задача не создана.")
+from app.training_api import build_router
+
+app.include_router(build_router(admin, authorized, fail, settings, ollama, submit))

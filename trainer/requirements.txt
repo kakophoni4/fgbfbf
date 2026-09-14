@@ -1,0 +1,8 @@
+transformers>=4.57,<5
+peft>=0.17,<0.19
+accelerate>=1.10,<2
+bitsandbytes>=0.48,<0.50
+datasets>=4,<5
+safetensors>=0.6,<1
+sentencepiece>=0.2,<1
+protobuf>=5,<7

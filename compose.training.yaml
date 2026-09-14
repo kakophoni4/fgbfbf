@@ -1,0 +1,31 @@
+# Optional single GPU worker. Use with compose.yaml and your existing override.
+services:
+  trainer:
+    depends_on:
+      ai-api:
+        condition: service_healthy
+    build:
+      context: .
+      dockerfile: trainer/Dockerfile
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    environment:
+      DATABASE_PATH: /data/ai.sqlite3
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - ai-data:/data
+    shm_size: 2gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${TRAINING_GPU_ID:-0}"]
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
