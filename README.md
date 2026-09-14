@@ -26,6 +26,7 @@ FastAPI-сервис между backend CRM и Ollama. CRM передаёт ис
 
 ## Документация
 
+- [Полное ТЗ команде разработки CRM](docs/CRM_SPEC.md)
 - [Развёртывание и серверные проверки](docs/SERVER.md)
 - [Контракт для разработчиков CRM](docs/API.md)
 - [Границы первой версии](docs/LIMITATIONS.md)
